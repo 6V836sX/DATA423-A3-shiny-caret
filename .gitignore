@@ -1,0 +1,36 @@
+# R / RStudio
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+.Rapp.history
+.Rproj
+.Rprofile
+
+# renv
+packrat/
+renv/library/
+renv/staging/
+
+# Shiny & local outputs
+app/SavedModels/*.rds
+app/SavedModels/*.RData
+app/.rsconnect/
+rsconnect/
+shinyapps/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Logs / cache / misc
+*.log
+*.tmp
+.cache/
+*.html
+docs/figs/*.svg
+docs/figs/*.png
+
+# Optionally ignore large data if needed
+# data/raw/
+# data/processed/
