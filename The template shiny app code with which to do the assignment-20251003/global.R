@@ -9,7 +9,6 @@ library(recipes) # The recipes package is central to preprocessing
 library(doParallel) # We employ a form of parallelism that works for MAC/Windows/Ubuntu
 library(caret) # This code implements the CARET framework: see http://topepo.github.io/caret/index.html for details
 library(rlang)
-#library(rJava)
 library(devtools)
 library(BiocManager)
 if (!library("mixOmics", logical.return = TRUE)) {
@@ -19,6 +18,7 @@ library(mixOmics)
 library(rlist)
 library(ggplot2)
 library(butcher)
+library(here)
 
 options(digits = 3)
 
@@ -26,12 +26,112 @@ glmnet_initial <- c("naomit", "month", "dummy") # <-- These are arbitrary starti
 pls_initial <- c("impute_knn","dow", "dummy")   # <-- These are arbitrary starting values. Set these to your best recommendation
 rpart_initial <- c("dow", "month") # <-- These are arbitrary starting values. Set these to your best recommendation
 # maintenance point ---------------------------------------------------------------------------------------------------------------------------
+
+# helper * explanation ---------------------------------------------------------------------------------------------------------------------------
+
+makeExplanation <- function(title = "Diagnostic Explanations", bullets) {
+  renderUI({
+    tagList(
+      h4(title),
+      tags$ul(lapply(bullets, function(b) tags$li(b)))
+    )
+  })
+}
+
+# Build a seeds list sized for a specific grid size, without touching the global getTrControl()
+.make_local_seeds <- function(n_resamples = 25, grid_size = 8, min_seed = 1000L, max_seed = 5000L) {
+  set.seed(673)  # keep your original seed base
+  seeds <- vector("list", length = n_resamples + 1L)
+  for (i in seq_len(n_resamples)) {
+    seeds[[i]] <- as.integer(runif(n = grid_size, min = min_seed, max = max_seed))
+  }
+  seeds[[n_resamples + 1L]] <- as.integer(runif(n = 1, min = min_seed, max = max_seed))
+  seeds
+}
+
+
+
+
 # add further preprocessing choices for the new methods here
 baseline_initial <- c("impute_knn", "zv", "center", "scale", "month", "dow", "dummy")
 lm_initial     <- c(baseline_initial, "corr")
+# PCR does PCA inside the method; do NOT add step_pca in the recipe.
+pcr_initial <- c("impute_knn", "zv", "center", "scale", "month", "dow", "dummy")
+# Tree/rule-based model: no need to center/scale/corr. Keep missing-value handling + factors + date feats.
+cubist_initial <- c("impute_knn", "zv", "month", "dow", "dummy")
+# Optionally try an alternative preset with bag imputation for top contenders:
+cubist_initial_bag <- c("impute_bag", "zv", "month", "dow", "dummy")
+rf_initial <- c("impute_knn", "zv", "month", "dow", "dummy")
+# You may also test a variant with bagging imputation for finalists:
+# rf_initial_bag <- c("impute_bag", "zv", "month", "dow", "dummy")
+# ranger
+ranger_initial <- c("month", "dow", "impute_bag", "zv", "dummy")
+# gbm
+gbm_initial <- c("indicate_na", "month", "dow", "impute_bag", "impute_mode", "zv", "other", "unknown", "dummy")
 
+# SVM needs scaling; keep imputation + dummies; drop zero-variance
+svmR_initial <- c("impute_knn", "zv", "center", "scale", "month", "dow", "dummy")
+# SVM-Poly needs scaling; keep impute + dummies; drop zero-variance; add date features if desired
+svmP_initial <- c("impute_knn", "zv", "center", "scale", "month", "dow", "dummy")
+# Robust default for MARS (earth):
+# 1) create NA indicators → 2) date features → 3) impute (bag for num + mode for cats)
+# 4) drop zero-variance → 5) dummy encode
+earth_initial <- c("indicate_na", "month", "dow", "impute_bag", "impute_mode", "zv", "dummy")
+# Bagged MARS (GCV): keep the same robust NA-safe pipeline as earth
+bagEarthGCV_initial <- c("indicate_na", "month", "dow", "impute_bag", "impute_mode", "zv", "dummy")
+# Neural Network (nnet): numerical scaling is critical; use imputation + dummy encoding
+nnet_initial <- c("indicate_na", "impute_bag", "impute_mode", "zv", "center", "scale", "dummy")
+# avNNet benefits from normalized numerics + robust NA handling + dummies
+avNNet_initial <- c("indicate_na", "month", "dow", "impute_bag", "impute_mode", "zv", "center", "scale", "dummy")
+mlp_initial    <- c("impute_knn", "zv", "center", "scale", "month", "dow", "dummy")
+monmlp_initial <- c("impute_knn", "zv", "center", "scale", "month", "dow", "dummy")
 
+# KNN 
+knn_initial <- c("impute_knn", "zv", "center", "scale", "month", "dow", "dummy")
+# BayesGLM benefits from: (a) robust NA handling, (b) removing degenerate columns,
+# (c) reducing extreme collinearity, (d) standardizing scales, and
+# (e) representing categorical/date info as dummies.
+bayesglm_initial <- c("indicate_na", "impute_knn", "zv", "corr", "center", "scale", "month", "dow", "dummy")
+# BayesGLM: handle degenerate cols first, then impute; map factor NAs to "unknown" before dummies
+# Order: zv -> indicate_na -> impute_knn -> corr -> center -> scale -> month -> dow -> dummy
+bayesglm_initial <- c("zv", "indicate_na", "impute_knn", "corr", "center", "scale", "month", "dow", "dummy")
+# Bayesian Lasso: linear model with L1 shrinkage—benefits from scaling;
+# also remove highly correlated columns to stabilize.
+blasso_initial <- c(  "impute_knn",  "zv",  "center", "scale",  "corr",  "month", "dow",  "dummy")
+# Bayesian Bridge (family incl. ridge/bridge priors): same prep as blasso.
+bridge_initial <- c(  "impute_knn",  "zv",  "center", "scale",  "corr",  "month", "dow",  "dummy")
+# M5 requires numeric predictors and benefits from normalization.Keep dummy variables and scale to stabilize linear models in leaves.
+m5rules_initial <- c("impute_knn", "zv", "center", "scale", "dummy")
+# SVM-Linear (LiblineaR): impute NAs, remove zero-variance cols, standardize (center/scale),# add date features (month, dow), then one-hot encode factors.
+svmL2_initial <- c(  "impute_bag",  "zv",  "center",  "scale",  "month", "dow",  "dummy")
+# Elastic Net needs standardized numeric predictors and dummy-coded factors.
+# We keep month/dow signals then drop the raw date in the server recipe.
+enet_initial <- c("impute_bag", "zv", "center", "scale", "month", "dow", "dummy")
+# RBF nets like numeric, standardized inputs + dummies for factors; keep date signals.
+rbfdda_initial <- c("impute_bag", "zv", "center", "scale", "month", "dow", "dummy")
+# DENFIS requires numeric, non-missing input; center/scale for stability; dummy for factors
+denfis_initial <- c("impute_bag", "zv", "month", "dow", "dummy", "center", "scale")
+# GAM: use imputation + drop ZV + keep month/dow + dummy for factors
+gam_initial <- c("impute_bag","zv","month","dow","dummy")
+# GaussprRadial: typical numeric preprocessing (center, scale, dummy for factors)
+gaussprRadial_initial <- c("impute_bag","zv","center","scale","dummy")
+# GAMBoost prefers complete numerical design (impute→zv→date features→dummies→(optional) center/scale)
+gamboost_initial <- c("indicate_na","impute_mode","impute_bag","zv","month","dow","dummy","center","scale","naomit")
+# Trees handle raw factors; we only need robust imputation, optional date features, and guard against constants.
+rfRules_initial <- c("impute_bag","month","dow","other","zv")
+# Treebag requires numeric or dummy-coded features; prefers centered/scaled inputs
+treebag_initial <- c("impute_median", "zv", "center", "scale", "dummy")
 
+# Binary predictors required → discretize numerics, one-hot factors, drop constants/dates
+logreg_logic_initial <- c("impute_bag","month","dow","dummy","zv","rm")
+# RBF kernel needs centered/scaled numerics and dummies; drop dates, remove constants
+rvmRadial_initial <- c("impute_bag","month","dow","dummy","center","scale","zv","rm")
+# BRNN needs numeric matrix; impute -> date signals -> dummies -> center/scale -> drop constants
+brnn_initial <- c("impute_bag","month","dow","dummy","center","scale","zv","rm")
+# KRLS needs numeric matrix, so impute → dummy → center/scale → remove constants
+krls_initial <- c("impute_bag","dummy","center","scale","zv","rm")
+
+# end of maintenance point ---------------------------------------------------------------------------------------------------------------------------
 startMode <- function(Parallel = TRUE) {
   if (Parallel) {
     clus <- makeCluster(min(c(3,detectCores(all.tests = FALSE, logical = TRUE))))
